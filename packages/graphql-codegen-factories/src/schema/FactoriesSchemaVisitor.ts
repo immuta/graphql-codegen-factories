@@ -16,6 +16,9 @@ import {
   isUnionType,
   isInterfaceType,
   isObjectType,
+  isInputObjectType,
+  GraphQLInputObjectType,
+  ObjectFieldNode,
 } from "graphql";
 import {
   DeclarationBlock,
@@ -31,6 +34,8 @@ import {
 export interface FactoriesSchemaVisitorRawConfig
   extends FactoriesBaseVisitorRawConfig {
   scalarDefaults?: Record<string, string>;
+  namedPropertyDefaults?: Record<string, string>
+  setNullableAsNull?: boolean
 
   // the typescript plugin's options that we need to support explicitly:
   enumsAsTypes?: boolean;
@@ -52,10 +57,21 @@ export interface FactoriesSchemaVisitorRawConfig
   importTypesNamespace?: string;
 }
 
+function assertIsString(
+  value: unknown,
+  message: string
+): asserts value is string {
+  if (typeof value !== 'string') {
+    throw Error(message);
+  }
+}
 export interface FactoriesSchemaVisitorParsedConfig
   extends FactoriesBaseVisitorParsedConfig {
   enumsAsTypes: boolean;
   scalarDefaults: Record<string, string>;
+  namedPropertyDefaults: Record<string, string>;
+  setNullableAsNull: boolean;
+
   namespacedImportName: string | null;
   typesPath?: string;
   importTypesNamespace?: string;
@@ -103,11 +119,14 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
       implementations: GraphQLObjectType[];
     }
   >;
+  protected transformedToField : Record<string, string>;
 
   constructor(schema: GraphQLSchema, config: FactoriesSchemaVisitorRawConfig) {
     const parsedConfig = {
       enumsAsTypes: getConfigValue(config.enumsAsTypes, false),
+      setNullableAsNull: getConfigValue(config.setNullableAsNull, true),
       scalarDefaults: getConfigValue(config.scalarDefaults, {}),
+      namedPropertyDefaults: getConfigValue(config.namedPropertyDefaults, {}),
       namespacedImportName: getConfigValue(
         config.namespacedImportName,
         undefined
@@ -129,6 +148,7 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
     this.enums = {};
     this.unions = {};
     this.interfaces = {};
+    this.transformedToField = {}
 
     const initializeInterface = (name: string) => {
       if (this.interfaces[name] == null) {
@@ -138,6 +158,7 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
         };
       }
     };
+
     Object.values(schema.getTypeMap()).forEach((type) => {
       if (isEnumType(type)) {
         this.enums[type.name] = type;
@@ -157,8 +178,14 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
           initializeInterface(inter.name);
           this.interfaces[inter.name].implementations.push(type);
         });
+
       }
+      if (isInputObjectType(type)){
+
+      }
+      
     });
+
   }
 
   public getImports() {
@@ -199,7 +226,7 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
           node.kind === "ObjectTypeDefinition"
             ? indent(indent(`__typename: "${node.name.value}",`))
             : null,
-          ...(node.fields ?? []),
+            ...(this.getFieldsDefaults(node.fields, node.name.value) ?? []),
           indent(indent("...props,")),
           indent("};"),
         ]
@@ -212,12 +239,73 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
     node: UnvisitedFieldDefinitionNode | UnvisitedInputValueDefinitionNode
   ): string {
     const { defaultValue, isNullable } = node.type;
-    return indent(
-      indent(`${node.name.value}: ${isNullable ? "null" : defaultValue},`)
+    const convertedField = indent(
+      indent(
+        `${node.name.value}: ${(isNullable && this.config.setNullableAsNull) ? "null" : defaultValue},`
+      )
     );
+    this.transformedToField[convertedField] = node.name.value;
+    return convertedField
   }
 
-  protected getDefaultValue(nodeName: string): string {
+  protected setField(nodeName: string, isNullable: boolean, defaultValue: string): string{
+    if (nodeName  in this.config.scalarDefaults){
+        return this.config.scalarDefaults[nodeName]
+      }
+    if (isNullable && this.config.setNullableAsNull){
+      return 'null';
+    }
+    else{
+      return defaultValue
+
+    }
+    
+  }
+
+  protected setDefaultFieldInputValue(fieldName: string, parentName: string): string | null{
+    const parentFieldName = `${parentName}.${fieldName}`
+    if(parentFieldName in this.config.namedPropertyDefaults){
+      return this.config.namedPropertyDefaults[parentFieldName]
+    }
+    if(fieldName in this.config.namedPropertyDefaults){
+      return this.config.namedPropertyDefaults[fieldName]
+    }
+    return null;
+  }
+
+  protected getFieldsDefaults(fields: (readonly FieldDefinitionNode[] | readonly InputValueDefinitionNode[] |undefined), parent: string ): string[] | undefined{
+    if(!fields){
+      return undefined;
+    }
+
+
+    const fieldsStr : string[] = []
+    fields.forEach((field) => {
+      assertIsString(field, `${field} isn't actually a string`);
+     const fieldName = this.transformedToField[field]
+     const defaultFieldInputValue = this.setDefaultFieldInputValue(fieldName, parent)
+     if(!defaultFieldInputValue){
+      fieldsStr.push(field)
+     }
+     else{
+      fieldsStr.push(indent(indent(`${fieldName}: ${defaultFieldInputValue},`)))
+     }
+
+    });
+
+    
+
+
+
+
+
+    return fieldsStr;
+    
+  }
+
+  
+
+  protected getScalarDefaultValue(nodeName: string): string {
     const scalarName =
       nodeName in this.unions
         ? // Take the first type from an union
@@ -226,7 +314,6 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
         ? // Take the first implementation from an interface
           this.interfaces[nodeName].implementations[0].name
         : nodeName;
-
     if (scalarName in this.config.scalarDefaults) {
       return this.config.scalarDefaults[scalarName];
     }
@@ -262,11 +349,10 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
   NamedType(node: NamedTypeNode): VisitedTypeNode {
     return {
       typename: node.name.value,
-      defaultValue: this.getDefaultValue(node.name.value),
+      defaultValue: this.getScalarDefaultValue(node.name.value),
       isNullable: true,
     };
   }
-
   ListType(node: UnvisitedListTypeNode): VisitedTypeNode {
     return {
       typename: node.type.typename,
@@ -283,20 +369,21 @@ export class FactoriesSchemaVisitor extends FactoriesBaseVisitor<
   }
 
   FieldDefinition(node: UnvisitedFieldDefinitionNode): string {
-    return this.convertField(node);
-  }
+    return this.convertField(node);}
 
   InputObjectTypeDefinition(node: InputObjectTypeDefinitionNode): string {
     return this.convertObjectType(node);
   }
 
-  InputValueDefinition(node: UnvisitedInputValueDefinitionNode): string {
+  InputValueDefinition(node: UnvisitedInputValueDefinitionNode): string{
+    
     return this.convertField(node);
   }
 
   ObjectTypeDefinition(node: ObjectTypeDefinitionNode): string | undefined {
     return this.convertObjectType(node);
   }
+
 
   UnionTypeDefinition(
     node: UnvisitedUnionTypeDefinitionNode

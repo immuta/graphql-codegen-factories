@@ -39,9 +39,9 @@
     "graphql": "^16.3.0"
   },
   "dependencies": {
-    "@graphql-codegen/plugin-helpers": "^2.4.2",
-    "@graphql-codegen/visitor-plugin-common": "^2.7.4",
-    "change-case-all": "^1.0.14"
+    "@graphql-codegen/plugin-helpers": "2.4.2",
+    "@graphql-codegen/visitor-plugin-common": "2.7.4",
+    "change-case-all": "1.0.14"
   },
   "scripts": {
     "prebuild": "rm -rf ./build",
